@@ -1,0 +1,59 @@
+running build_ext
+building 'opencood.pcdet_utils.iou3d_nms.iou3d_nms_cuda' extension
+creating /home/amod/OpenCOOD/opencood/pcdet_utils/build
+creating /home/amod/OpenCOOD/opencood/pcdet_utils/build/temp.linux-x86_64-cpython-37
+creating /home/amod/OpenCOOD/opencood/pcdet_utils/build/temp.linux-x86_64-cpython-37/opencood
+creating /home/amod/OpenCOOD/opencood/pcdet_utils/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils
+creating /home/amod/OpenCOOD/opencood/pcdet_utils/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/iou3d_nms
+creating /home/amod/OpenCOOD/opencood/pcdet_utils/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/iou3d_nms/src
+Emitting ninja build file /home/amod/OpenCOOD/opencood/pcdet_utils/build/temp.linux-x86_64-cpython-37/build.ninja...
+Compiling objects...
+Using envvar MAX_JOBS (1) as the number of workers...
+ninja: error: '/home/amod/OpenCOOD/opencood/pcdet_utils/opencood/pcdet_utils/iou3d_nms/src/iou3d_cpu.cpp', needed by '/home/amod/OpenCOOD/opencood/pcdet_utils/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/iou3d_nms/src/iou3d_cpu.o', missing and no known rule to make it
+Traceback (most recent call last):
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/torch/utils/cpp_extension.py", line 1906, in _run_ninja_build
+    env=env)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/subprocess.py", line 512, in run
+    output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['ninja', '-v', '-j', '1']' returned non-zero exit status 1.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "setup.py", line 62, in <module>
+    'src/sampling_gpu.cu',
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/__init__.py", line 87, in setup
+    return distutils.core.setup(**attrs)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/_distutils/core.py", line 185, in setup
+    return run_commands(dist)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/_distutils/core.py", line 201, in run_commands
+    dist.run_commands()
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/_distutils/dist.py", line 969, in run_commands
+    self.run_command(cmd)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/dist.py", line 1208, in run_command
+    super().run_command(command)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/_distutils/dist.py", line 988, in run_command
+    cmd_obj.run()
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/command/build_ext.py", line 84, in run
+    _build_ext.run(self)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/_distutils/command/build_ext.py", line 346, in run
+    self.build_extensions()
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/torch/utils/cpp_extension.py", line 843, in build_extensions
+    build_ext.build_extensions(self)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/_distutils/command/build_ext.py", line 468, in build_extensions
+    self._build_extensions_serial()
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/_distutils/command/build_ext.py", line 494, in _build_extensions_serial
+    self.build_extension(ext)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/command/build_ext.py", line 246, in build_extension
+    _build_ext.build_extension(self, ext)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/Cython/Distutils/build_ext.py", line 135, in build_extension
+    super(build_ext, self).build_extension(ext)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/setuptools/_distutils/command/build_ext.py", line 556, in build_extension
+    depends=ext.depends,
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/torch/utils/cpp_extension.py", line 668, in unix_wrap_ninja_compile
+    with_cuda=with_cuda)
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/torch/utils/cpp_extension.py", line 1578, in _write_ninja_file_and_compile_objects
+    error_prefix='Error compiling objects for extension')
+  File "/home/amod/miniconda3/envs/opencood/lib/python3.7/site-packages/torch/utils/cpp_extension.py", line 1916, in _run_ninja_build
+    raise RuntimeError(message) from e
+RuntimeError: Error compiling objects for extension

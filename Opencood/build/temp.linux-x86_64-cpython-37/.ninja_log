@@ -1,0 +1,25 @@
+# ninja log v5
+0	7263	1760947061979196276	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/iou3d_nms/src/iou3d_cpu.o	64d38f0fd04aa6e0
+7266	14473	1760947069190172742	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/iou3d_nms/src/iou3d_nms.o	7fa86ef886bf32eb
+14473	24185	1760947078897140784	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/iou3d_nms/src/iou3d_nms_api.o	cc7e9a62d4e7e0a9
+24185	27458	1760947082179129906	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/iou3d_nms/src/iou3d_nms_kernel.o	e9affde5138e33c
+2	9750	1760947092164096596	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/roiaware_pool3d/src/roiaware_pool3d.o	cb355ee519d0a428
+9750	10653	1760947093062093585	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/roiaware_pool3d/src/roiaware_pool3d_kernel.o	a0cda927d0637cfa
+2	4208	1760947097504078648	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_stack/src/ball_query.o	fdeb494a22d97791
+4209	25933	1760947119226004703	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_stack/src/ball_query_gpu.o	8f802d3daf8e5263
+25933	30130	1760947123426990232	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_stack/src/group_points.o	3711aec419f10709
+30130	51611	1760947144906915405	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_stack/src/group_points_gpu.o	5f630789d07925be
+51611	55898	1760947149193900307	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_stack/src/interpolate.o	171c3f2b217f4be6
+55898	77445	1760947170740823620	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_stack/src/interpolate_gpu.o	ea7b1234a3a41e1e
+77445	87519	1760947180809787336	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_stack/src/pointnet2_api.o	d0ddbb2846548dd4
+87520	91723	1760947185019772083	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_stack/src/sampling.o	bb057d3851eb74e1
+91724	114614	1760947207908688321	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_stack/src/sampling_gpu.o	2b5fff6842fa342e
+3	4170	1760947212339671946	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_batch/src/ball_query.o	d2917c5a1260b1bf
+4171	25686	1760947233854591729	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_batch/src/ball_query_gpu.o	88b4af259bbf3645
+25686	29798	1760947237967576262	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_batch/src/group_points.o	85880472ac90c9eb
+29798	51359	1760947259528494513	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_batch/src/group_points_gpu.o	3b2c57a691ad15e9
+51359	55502	1760947263670478682	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_batch/src/interpolate.o	9de105a61f239199
+55502	76963	1760947285131396025	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_batch/src/interpolate_gpu.o	e1611cc1b2cc80b1
+76963	87164	1760947295326356396	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_batch/src/pointnet2_api.o	43aa2807a7c11ed4
+87164	91287	1760947299455340281	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_batch/src/sampling.o	70ab60d83fbb4ef8
+91287	113974	1760947322141251089	/home/amod/OpenCOOD/build/temp.linux-x86_64-cpython-37/opencood/pcdet_utils/pointnet2/pointnet2_batch/src/sampling_gpu.o	7233e2447100e4fa
