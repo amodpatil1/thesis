@@ -407,6 +407,25 @@ class IntermediateFusionDataset(basedataset.BaseDataset):
             self.post_processor.post_process(data_dict, output_dict)
         gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
 
+                # ---- DEBUG START ----
+        print("=== DEBUG ONE SAMPLE ===")
+        if pred_box_tensor is not None and pred_box_tensor.numel() > 0:
+            print("pred first 3:", pred_box_tensor[:3])
+            print("pred mean (x,y):",
+                pred_box_tensor[:, 0].mean().item(),
+                pred_box_tensor[:, 1].mean().item())
+        else:
+            print("no pred boxes")
+
+        if gt_box_tensor is not None and gt_box_tensor.numel() > 0:
+            print("gt first 3:", gt_box_tensor[:3])
+            print("gt mean (x,y):",
+                gt_box_tensor[:, 0].mean().item(),
+                gt_box_tensor[:, 1].mean().item())
+        else:
+            print("no gt boxes")
+        # ---- DEBUG END ----
+
         return pred_box_tensor, pred_score, gt_box_tensor
 
     def get_pairwise_transformation(self, base_data_dict, max_cav):
