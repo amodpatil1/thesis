@@ -171,6 +171,21 @@ def linset_assign_list(vis,
     update_mode : str
         Add or update the geometry.
     """
+    # If there are no boxes this frame, use an empty LineSet as fallback
+    if lineset_list2 is None or len(lineset_list2) == 0:
+        empty_ls = o3d.geometry.LineSet()
+        empty_ls.points = o3d.utility.Vector3dVector(np.zeros((0, 3)))
+        empty_ls.lines = o3d.utility.Vector2iVector(np.zeros((0, 2), dtype=np.int32))
+        empty_ls.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
+
+        for j in range(len(lineset_list1)):
+            lineset_list1[j] = lineset_assign(lineset_list1[j], empty_ls)
+            if update_mode == 'add':
+                vis.add_geometry(lineset_list1[j])
+            else:
+                vis.update_geometry(lineset_list1[j])
+        return
+
     for j in range(len(lineset_list1)):
         index = j if j < len(lineset_list2) else -1
         lineset_list1[j] = \
@@ -384,9 +399,13 @@ def visualize_single_sample_output_bev(pred_box, gt_box, pcd, dataset,
             cv2.polylines(bev_map, [bbx], True, (255, 0, 0), 1)
 
     if show_vis:
-        plt.axis("off")
-        plt.imshow(bev_map)
+        plt.axis("on")
+        plt.imshow(bev_map, extent=[0, bev_map.shape[1], bev_map.shape[0], 0])
+        plt.xticks(np.arange(0, bev_map.shape[1], 50))
+        plt.yticks(np.arange(0, bev_map.shape[0], 50))
         plt.show()
+
+
     if save_path:
         plt.axis("off")
         plt.imshow(bev_map)
@@ -499,9 +518,17 @@ def visualize_inference_sample_dataloader(pred_box_tensor,
         color_encoding(origin_lidar[:, -1] if mode == 'intensity'
                        else origin_lidar[:, 2], mode=mode)
 
-    if not isinstance(pred_box_tensor, np.ndarray):
+    # --------- NEW: safe handling of pred / gt boxes ----------
+    # Predictions can be None if there is no detection in this frame
+    if pred_box_tensor is None:
+        pred_box_tensor = np.zeros((0, 8, 3), dtype=np.float32)
+    elif not isinstance(pred_box_tensor, np.ndarray):
         pred_box_tensor = common_utils.torch_tensor_to_numpy(pred_box_tensor)
-    if not isinstance(gt_box_tensor, np.ndarray):
+
+    # Ground truth can also be None or missing in some setups
+    if gt_box_tensor is None:
+        gt_box_tensor = np.zeros((0, 8, 3), dtype=np.float32)
+    elif not isinstance(gt_box_tensor, np.ndarray):
         gt_box_tensor = common_utils.torch_tensor_to_numpy(gt_box_tensor)
 
     # left -> right hand
