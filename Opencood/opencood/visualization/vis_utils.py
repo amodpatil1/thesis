@@ -14,6 +14,8 @@ from matplotlib import cm
 
 from opencood.utils import box_utils
 from opencood.utils import common_utils
+from itertools import zip_longest
+
 
 VIRIDIS = np.array(cm.get_cmap('plasma').colors)
 VID_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
@@ -21,47 +23,48 @@ VID_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
 
 def bbx2linset(bbx_corner, order='hwl', color=(0, 1, 0)):
     """
-    Convert the torch tensor bounding box to o3d lineset for visualization.
-
-    Parameters
-    ----------
-    bbx_corner : torch.Tensor
-        shape: (n, 8, 3).
-
-    order : str
-        The order of the bounding box if shape is (n, 7)
-
-    color : tuple
-        The bounding box color.
-
-    Returns
-    -------
-    line_set : list
-        The list containing linsets.
+    Convert predicted boxes to Open3D LineSets.
+    Accepts None, torch.Tensor, or np.ndarray.
+    Returns an empty list if there is nothing to draw.
     """
+    import numpy as np
+    from opencood.utils import common_utils, box_utils
+
+    # --- handle None early ---
+    if bbx_corner is None:
+        return []
+
+    # Convert tensors/dicts/lists safely (your torch_tensor_to_numpy already patched)
     if not isinstance(bbx_corner, np.ndarray):
         bbx_corner = common_utils.torch_tensor_to_numpy(bbx_corner)
+        if bbx_corner is None:
+            return []
 
-    if len(bbx_corner.shape) == 2:
-        bbx_corner = box_utils.boxes_to_corners_3d(bbx_corner,
-                                                   order)
+    bbx_corner = np.asarray(bbx_corner)
 
-    # Our lines span from points 0 to 1, 1 to 2, 2 to 3, etc...
+    # Nothing to draw
+    if bbx_corner.size == 0:
+        return []
+
+    # If input is (N, 7) param boxes, convert to (N, 8, 3) corners
+    if bbx_corner.ndim == 2:
+        bbx_corner = box_utils.boxes_to_corners_3d(bbx_corner, order)
+
+    # Still nothing?
+    if bbx_corner.shape[0] == 0:
+        return []
+
     lines = [[0, 1], [1, 2], [2, 3], [0, 3],
              [4, 5], [5, 6], [6, 7], [4, 7],
              [0, 4], [1, 5], [2, 6], [3, 7]]
-
-    # Use the same color for all lines
     colors = [list(color) for _ in range(len(lines))]
     bbx_linset = []
 
     for i in range(bbx_corner.shape[0]):
-        bbx = bbx_corner[i]
-        # o3d use right-hand coordinate
-        bbx[:, :1] = - bbx[:, :1]
-
-        print(f"[LOG] Displaying LineSet ({'GT' if color==(0,1,0) else 'Pred'}) box #{i}")
-
+        bbx = bbx_corner[i].copy()
+        # o3d uses right-handed; flip X
+        bbx[:, :1] = -bbx[:, :1]                                #bbx[:, 1:2] = -bbx[:, 1:2] # flip y axis
+                                                                #bbx[:, 2:3] = -bbx[:, 2:3] # flip z axis
 
         line_set = o3d.geometry.LineSet()
         line_set.points = o3d.utility.Vector3dVector(bbx)
@@ -74,39 +77,59 @@ def bbx2linset(bbx_corner, order='hwl', color=(0, 1, 0)):
 
 def bbx2oabb(bbx_corner, order='hwl', color=(0, 0, 1)):
     """
-    Convert the torch tensor bounding box to o3d oabb for visualization.
+    Convert bbox corners or (N,7) boxes to Open3D OABBs for visualization.
 
-    Parameters
-    ----------
-    bbx_corner : torch.Tensor
-        shape: (n, 8, 3).
-
-    order : str
-        The order of the bounding box if shape is (n, 7)
-
-    color : tuple
-        The bounding box color.
-
-    Returns
-    -------
-    oabbs : list
-        The list containing all oriented bounding boxes.
+    bbx_corner:  (N, 8, 3) corners  OR  (N, 7) boxes (order given by `order`)
+                 Can also be a torch.Tensor or numpy.ndarray. May be None/empty.
     """
-    if not isinstance(bbx_corner, np.ndarray):
-        bbx_corner = common_utils.torch_tensor_to_numpy(bbx_corner)
+    # --- early exits for None/empty inputs ---
+    if bbx_corner is None:
+        return []
 
-    if len(bbx_corner.shape) == 2:
-        bbx_corner = box_utils.boxes_to_corners_3d(bbx_corner,
-                                                   order)
+    # Accept torch or numpy; handle empties before conversion
+    try:
+        import torch
+    except Exception:
+        torch = None
+
+    if torch is not None and isinstance(bbx_corner, torch.Tensor):
+        if bbx_corner.numel() == 0 or (bbx_corner.ndim >= 1 and bbx_corner.shape[0] == 0):
+            return []
+        # move to CPU numpy safely
+        bbx_corner = bbx_corner.detach().cpu().numpy()
+    else:
+        # numpy path
+        import numpy as np
+        if not isinstance(bbx_corner, np.ndarray):
+            # fallback to original util, but guard for None
+            if bbx_corner is None:
+                return []
+            bbx_corner = common_utils.torch_tensor_to_numpy(bbx_corner)
+
+        if bbx_corner.size == 0 or (bbx_corner.ndim >= 1 and bbx_corner.shape[0] == 0):
+            return []
+
+    # If shape is (N,7) convert to corners
+    if bbx_corner.ndim == 2:  # assume (N,7)
+        bbx_corner = box_utils.boxes_to_corners_3d(bbx_corner, order)
+
+    # Validate final shape (N,8,3)
+    if bbx_corner.ndim != 3 or bbx_corner.shape[-2:] != (8, 3):
+        # malformed input; nothing to draw
+        return []
+
+    import numpy as np
+    import open3d as o3d
+
     oabbs = []
-
     for i in range(bbx_corner.shape[0]):
         bbx = bbx_corner[i]
-        # o3d use right-hand coordinate
-        bbx[:, :1] = - bbx[:, :1]
+        if not np.isfinite(bbx).all():
+            continue  # skip bad boxes
 
-        print(f"[LOG] Displaying OABB ({'GT' if color==(0,1,0) else 'Pred'}) with 8 corners: {bbx.tolist()}")
-
+        # Flip x to match right-hand coord used by Open3D
+        bbx[:, :1] = -bbx[:, :1]                                #bbx[:, 1:2] = -bbx[:, 1:2] # flip y axis
+                                                                #bbx[:, 2:3] = -bbx[:, 2:3] # flip z axis
 
         tmp_pcd = o3d.geometry.PointCloud()
         tmp_pcd.points = o3d.utility.Vector3dVector(bbx)
@@ -144,7 +167,8 @@ def bbx2aabb(bbx_center, order):
     for i in range(bbx_corner.shape[0]):
         bbx = bbx_corner[i]
         # o3d use right-hand coordinate
-        bbx[:, :1] = - bbx[:, :1]
+        bbx[:, :1] = - bbx[:, :1]                  #bbx[:, 1:2] = -bbx[:, 1:2] # flip y axis
+                                                   #bbx[:, 2:3] = -bbx[:, 2:3] # flip z axis
 
         tmp_pcd = o3d.geometry.PointCloud()
         tmp_pcd.points = o3d.utility.Vector3dVector(bbx)
@@ -161,61 +185,42 @@ def linset_assign_list(vis,
                        lineset_list2,
                        update_mode='update'):
     """
-    Associate two lists of lineset.
-
-    Parameters
-    ----------
-    vis : open3d.Visualizer
-    lineset_list1 : list
-    lineset_list2 : list
-    update_mode : str
-        Add or update the geometry.
+    Safely combine/update two LineSet lists (pred vs gt).
+    Works when either list is shorter or empty.
     """
-    # If there are no boxes this frame, use an empty LineSet as fallback
-    if lineset_list2 is None or len(lineset_list2) == 0:
-        empty_ls = o3d.geometry.LineSet()
-        empty_ls.points = o3d.utility.Vector3dVector(np.zeros((0, 3)))
-        empty_ls.lines = o3d.utility.Vector2iVector(np.zeros((0, 2), dtype=np.int32))
-        empty_ls.colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
+    ls1 = lineset_list1 or []
+    ls2 = lineset_list2 or []
 
-        for j in range(len(lineset_list1)):
-            lineset_list1[j] = lineset_assign(lineset_list1[j], empty_ls)
-            if update_mode == 'add':
-                vis.add_geometry(lineset_list1[j])
-            else:
-                vis.update_geometry(lineset_list1[j])
-        return
-
-    for j in range(len(lineset_list1)):
-        index = j if j < len(lineset_list2) else -1
-        lineset_list1[j] = \
-            lineset_assign(lineset_list1[j],
-                                     lineset_list2[index])
+    out = []
+    for a, b in zip_longest(ls1, ls2, fillvalue=None):
+        # lineset_assign(a, b) should handle None (see patch below).
+        new_ls = lineset_assign(a, b)
+        if new_ls is None:
+            continue
         if update_mode == 'add':
-            vis.add_geometry(lineset_list1[j])
+            vis.add_geometry(new_ls)
         else:
-            vis.update_geometry(lineset_list1[j])
+            vis.update_geometry(new_ls)
+        out.append(new_ls)
+
+    return out
 
 
-def lineset_assign(lineset1, lineset2):
+def lineset_assign(ls_old, ls_new):
     """
-    Assign the attributes of lineset2 to lineset1.
-
-    Parameters
-    ----------
-    lineset1 : open3d.LineSet
-    lineset2 : open3d.LineSet
-
-    Returns
-    -------
-    The lineset1 object with 2's attributes.
+    Update an existing LineSet with a new one. Either may be None.
+    If ls_new is None, keep ls_old. If ls_old is None, use ls_new.
     """
+    if ls_new is None:
+        return ls_old
+    if ls_old is None:
+        return ls_new
 
-    lineset1.points = lineset2.points
-    lineset1.lines = lineset2.lines
-    lineset1.colors = lineset2.colors
-
-    return lineset1
+    # copy points/lines/colors from ls_new into ls_old
+    ls_old.points = ls_new.points
+    ls_old.lines = ls_new.lines
+    ls_old.colors = ls_new.colors
+    return ls_old
 
 
 def color_encoding(intensity, mode='intensity'):
@@ -239,6 +244,8 @@ def color_encoding(intensity, mode='intensity'):
     assert mode in ['intensity', 'z-value', 'constant']
 
     if mode == 'intensity':
+        intensity = np.asarray(intensity, dtype=float)
+        intensity = np.clip(intensity, 1e-6, None)
         intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
         int_color = np.c_[
             np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 0]),
@@ -271,6 +278,7 @@ def visualize_single_sample_output_gt(pred_tensor,
                                       gt_tensor,
                                       pcd,
                                       show_vis=True,
+                                      pc_offset=[20.0, 0.0, 0.0],
                                       save_path='',
                                       mode='constant'):
     """
@@ -278,14 +286,17 @@ def visualize_single_sample_output_gt(pred_tensor,
 
     Parameters
     ----------
-    pred_tensor : torch.Tensor
+    pred_tensor : torch.Tensor or np.ndarray
         (N, 8, 3) prediction.
 
-    gt_tensor : torch.Tensor
+    gt_tensor : torch.Tensor or np.ndarray
         (N, 8, 3) groundtruth bbx
 
-    pcd : torch.Tensor
-        PointCloud, (N, 4).
+    pcd : torch.Tensor or np.ndarray
+        PointCloud, (M, 4) or (B, M, 4).
+
+    pc_offset : list/tuple/np.ndarray of length 3
+        Offset [dx, dy, dz] in meters applied to the point cloud ONLY.
 
     show_vis : bool
         Whether to show visualization.
@@ -314,30 +325,57 @@ def visualize_single_sample_output_gt(pred_tensor,
         vis.run()
         vis.destroy_window()
 
+    # ---------- point cloud shape & type ----------
     if len(pcd.shape) == 3:
+        # take first frame if batched: (B, M, 4) -> (M, 4)
         pcd = pcd[0]
-    origin_lidar = pcd
-    if not isinstance(pcd, np.ndarray):
+
+    if isinstance(pcd, np.ndarray):
+        origin_lidar = pcd.copy()
+    else:
         origin_lidar = common_utils.torch_tensor_to_numpy(pcd)
 
+    # ---------- apply point cloud offset ----------
+    # hard-coded example if pc_offset is None
+    if pc_offset is None:
+        # you can change this to something huge to see it clearly
+        pc_offset = np.array([10.0, 5.0, 0.0], dtype=np.float32)
+    else:
+        pc_offset = np.asarray(pc_offset, dtype=np.float32)
+
+    # debug: print before / after one point
+    print("PC first point BEFORE offset:", origin_lidar[0, :3])
+    origin_lidar[:, 0] += pc_offset[0]
+    origin_lidar[:, 1] += pc_offset[1]
+    origin_lidar[:, 2] += pc_offset[2]
+    print("PC first point AFTER  offset:", origin_lidar[0, :3])
+
+    # ---------- color + handedness flip ----------
     origin_lidar_intcolor = \
         color_encoding(origin_lidar[:, -1] if mode == 'intensity'
                        else origin_lidar[:, 2], mode=mode)
-    # left -> right hand
+
+    # left -> right hand (flip X)
     origin_lidar[:, :1] = -origin_lidar[:, :1]
 
     o3d_pcd = o3d.geometry.PointCloud()
     o3d_pcd.points = o3d.utility.Vector3dVector(origin_lidar[:, :3])
     o3d_pcd.colors = o3d.utility.Vector3dVector(origin_lidar_intcolor)
 
+    # ---------- boxes (no offset, no noise) ----------
     oabbs_pred = bbx2oabb(pred_tensor, color=(1, 0, 0))
-    oabbs_gt = bbx2oabb(gt_tensor, color=(0, 1, 0))
+    oabbs_gt = []
+    if gt_tensor is not None:
+        oabbs_gt = bbx2oabb(gt_tensor, color=(0, 1, 0))
 
+    # ---------- visualize / save ----------
     visualize_elements = [o3d_pcd] + oabbs_pred + oabbs_gt
+
     if show_vis:
         custom_draw_geometry(o3d_pcd, oabbs_pred, oabbs_gt)
     if save_path:
         save_o3d_visualization(visualize_elements, save_path)
+
 
 
 def visualize_single_sample_output_bev(pred_box, gt_box, pcd, dataset,
@@ -366,7 +404,7 @@ def visualize_single_sample_output_bev(pred_box, gt_box, pcd, dataset,
     """
 
     if not isinstance(pcd, np.ndarray):
-        pcd = common_utils.torch_tensor_to_numpy(pcd)
+        pcd = common_utils.torch_tensor_to_numpy(pcd)  #conversion of pcd to tensor and then from a tensor to numpy array.
     if pred_box is not None and not isinstance(pred_box, np.ndarray):
         pred_box = common_utils.torch_tensor_to_numpy(pred_box)
     if gt_box is not None and not isinstance(gt_box, np.ndarray):
@@ -399,13 +437,9 @@ def visualize_single_sample_output_bev(pred_box, gt_box, pcd, dataset,
             cv2.polylines(bev_map, [bbx], True, (255, 0, 0), 1)
 
     if show_vis:
-        plt.axis("on")
-        plt.imshow(bev_map, extent=[0, bev_map.shape[1], bev_map.shape[0], 0])
-        plt.xticks(np.arange(0, bev_map.shape[1], 50))
-        plt.yticks(np.arange(0, bev_map.shape[0], 50))
+        plt.axis("off")
+        plt.imshow(bev_map)
         plt.show()
-
-
     if save_path:
         plt.axis("off")
         plt.imshow(bev_map)
@@ -422,54 +456,49 @@ def visualize_single_sample_dataloader(batch_data,
                                        mode='constant'):
     """
     Visualize a single frame of a single CAV for validation of data pipeline.
-
-    Parameters
-    ----------
-    o3d_pcd : o3d.PointCloud
-        Open3d PointCloud.
-
-    order : str
-        The bounding box order.
-
-    key : str
-        origin_lidar for late fusion and stacked_lidar for early fusion.
-
-    visualize : bool
-        Whether to visualize the sample.
-
-    batch_data : dict
-        The dictionary that contains current timestamp's data.
-
-    save_path : str
-        If set, save the visualization image to the path.
-
-    oabb : bool
-        If oriented bounding box is used.
     """
 
+    # ---------- 1. Get point cloud from batch ----------
     origin_lidar = batch_data[key]
     if not isinstance(origin_lidar, np.ndarray):
         origin_lidar = common_utils.torch_tensor_to_numpy(origin_lidar)
+
     # we only visualize the first cav for single sample
     if len(origin_lidar.shape) > 2:
         origin_lidar = origin_lidar[0]
+
+    # ---------- 2. Apply point cloud offset ----------
+    # offset in meters: (dx, dy, dz)
+    offset = np.array([20.0, 0.0, 0.0], dtype=np.float32)  # 20 m in x
+    print("PC first point BEFORE offset:", origin_lidar[0, :3])
+    origin_lidar[:, 0] += offset[0]
+    origin_lidar[:, 1] += offset[1]
+    origin_lidar[:, 2] += offset[2]
+    print("PC first point AFTER  offset:", origin_lidar[0, :3])
+
+    # ---------- 3. Color encoding ----------
     origin_lidar_intcolor = \
         color_encoding(origin_lidar[:, -1] if mode == 'intensity'
                        else origin_lidar[:, 2], mode=mode)
 
-    # left -> right hand
+    # ---------- 4. Coordinate system flip (left -> right hand) ----------
     origin_lidar[:, :1] = -origin_lidar[:, :1]
 
+    # ---------- 5. Fill Open3D point cloud ----------
     o3d_pcd.points = o3d.utility.Vector3dVector(origin_lidar[:, :3])
     o3d_pcd.colors = o3d.utility.Vector3dVector(origin_lidar_intcolor)
 
+    # ---------- 6. Bounding boxes ----------
     object_bbx_center = batch_data['object_bbx_center']
     object_bbx_mask = batch_data['object_bbx_mask']
     object_bbx_center = object_bbx_center[object_bbx_mask == 1]
 
     aabbs = bbx2linset(object_bbx_center, order) if not oabb else \
         bbx2oabb(object_bbx_center, order)
+
     visualize_elements = [o3d_pcd] + aabbs
+
+    # ---------- 7. Optional visualization ----------
     if visualize:
         o3d.visualization.draw_geometries(visualize_elements)
 
@@ -477,6 +506,7 @@ def visualize_single_sample_dataloader(batch_data,
         save_o3d_visualization(visualize_elements, save_path)
 
     return o3d_pcd, aabbs
+
 
 
 def visualize_inference_sample_dataloader(pred_box_tensor,
@@ -518,21 +548,14 @@ def visualize_inference_sample_dataloader(pred_box_tensor,
         color_encoding(origin_lidar[:, -1] if mode == 'intensity'
                        else origin_lidar[:, 2], mode=mode)
 
-    # --------- NEW: safe handling of pred / gt boxes ----------
-    # Predictions can be None if there is no detection in this frame
-    if pred_box_tensor is None:
-        pred_box_tensor = np.zeros((0, 8, 3), dtype=np.float32)
-    elif not isinstance(pred_box_tensor, np.ndarray):
+    if not isinstance(pred_box_tensor, np.ndarray):
         pred_box_tensor = common_utils.torch_tensor_to_numpy(pred_box_tensor)
-
-    # Ground truth can also be None or missing in some setups
-    if gt_box_tensor is None:
-        gt_box_tensor = np.zeros((0, 8, 3), dtype=np.float32)
-    elif not isinstance(gt_box_tensor, np.ndarray):
+    if not isinstance(gt_box_tensor, np.ndarray):
         gt_box_tensor = common_utils.torch_tensor_to_numpy(gt_box_tensor)
 
     # left -> right hand
-    origin_lidar[:, :1] = -origin_lidar[:, :1]
+    origin_lidar[:, :1] = -origin_lidar[:, :1]                     #bbx[:, 1:2] = -bbx[:, 1:2] # flip y axis
+                                                                   #bbx[:, 2:3] = -bbx[:, 2:3] # flip z axis
 
     o3d_pcd.points = o3d.utility.Vector3dVector(origin_lidar[:, :3])
     o3d_pcd.colors = o3d.utility.Vector3dVector(origin_lidar_intcolor)
@@ -543,55 +566,59 @@ def visualize_inference_sample_dataloader(pred_box_tensor,
     return o3d_pcd, pred_o3d_box, gt_o3d_box
 
 
-def visualize_sequence_dataloader(dataloader, order, color_mode='constant'):
+def visualize_sequence_dataloader(dataloader, order, color_mode='z-value'):
     """
     Visualize the batch data in animation.
-
-    Parameters
-    ----------
-    dataloader : torch.Dataloader
-        Pytorch dataloader
-
-    order : str
-        Bounding box order(N, 7).
-
-    color_mode : str
-        Color rendering mode.
     """
     vis = o3d.visualization.Visualizer()
     vis.create_window()
 
-    vis.get_render_option().background_color = [0.05, 0.05, 0.05]
-    vis.get_render_option().point_size = 1.0
-    vis.get_render_option().show_coordinate_frame = True
+    opt = vis.get_render_option()
+    opt.background_color = [0.05, 0.05, 0.05]
+    opt.point_size = 1.0
+    opt.show_coordinate_frame = True
 
-    # used to visualize lidar points
+    # dynamic containers (no fixed 50)
     vis_pcd = o3d.geometry.PointCloud()
-    # used to visualize object bounding box, maximum 50
     vis_aabbs = []
-    for _ in range(50):
-        vis_aabbs.append(o3d.geometry.LineSet())
 
     while True:
         for i_batch, sample_batched in enumerate(dataloader):
             print(i_batch)
-            pcd, aabbs = \
-                visualize_single_sample_dataloader(sample_batched['ego'],
-                                                   vis_pcd,
-                                                   order,
-                                                   mode=color_mode)
+
+            # build current frame's pcd + AABBs
+            pcd, aabbs = visualize_single_sample_dataloader(
+                sample_batched['ego'],
+                vis_pcd,
+                order,
+                mode=color_mode
+            )
+
+            # --- resize vis_aabbs to match current count ---
+            cur_n = len(aabbs)
+            if len(vis_aabbs) < cur_n:
+                vis_aabbs += [o3d.geometry.LineSet() for _ in range(cur_n - len(vis_aabbs))]
+            elif len(vis_aabbs) > cur_n:
+                # remove extras from the scene first
+                for j in range(len(vis_aabbs) - 1, cur_n - 1, -1):
+                    try:
+                        vis.remove_geometry(vis_aabbs[j], reset_bounding_box=False)
+                    except Exception:
+                        pass
+                vis_aabbs = vis_aabbs[:cur_n]
+
+            # --- first batch: add geometries once ---
             if i_batch == 0:
                 vis.add_geometry(pcd)
-                for i in range(len(vis_aabbs)):
-                    index = i if i < len(aabbs) else -1
-                    vis_aabbs[i] = lineset_assign(vis_aabbs[i], aabbs[index])
-                    vis.add_geometry(vis_aabbs[i])
+                for ls in vis_aabbs:
+                    vis.add_geometry(ls)
 
-            for i in range(len(vis_aabbs)):
-                index = i if i < len(aabbs) else -1
-                vis_aabbs[i] = lineset_assign(vis_aabbs[i], aabbs[index])
+            # --- update per-box (use i, not 'index') ---
+            for i in range(cur_n):
+                vis_aabbs[i] = lineset_assign(vis_aabbs[i], aabbs[i])
                 vis.update_geometry(vis_aabbs[i])
 
+            # --- update point cloud and render ---
             vis.update_geometry(pcd)
             vis.poll_events()
             vis.update_renderer()
