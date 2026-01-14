@@ -219,10 +219,10 @@ def main():
 
             # ---------- DETECTION INFERENCE ----------
             if opt.fusion_method == 'late':
-                pred_box_tensor, pred_score, gt_box_tensor = \
-                    inference_utils.inference_late_fusion(
-                        batch_data, model, opencood_dataset
-                    )
+            pred_box_tensor, pred_score, gt_box_tensor, per_cav = \
+                inference_utils.inference_late_fusion(
+                    batch_data, model, opencood_dataset
+                )
             elif opt.fusion_method == 'early':
                 pred_box_tensor, pred_score, gt_box_tensor = \
                     inference_utils.inference_early_fusion(
