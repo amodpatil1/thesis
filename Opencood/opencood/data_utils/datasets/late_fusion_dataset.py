@@ -122,43 +122,45 @@ class LateFusionDataset(basedataset.BaseDataset):
         return processed_data_dict
 
     def get_item_test(self, base_data_dict):
-        processed_data_dict = OrderedDict()
-        ego_id = -1
-        ego_lidar_pose = []
+    processed_data_dict = OrderedDict()
+    ego_id = -1
+    ego_lidar_pose = []
 
-        # first find the ego vehicle's lidar pose
-        for cav_id, cav_content in base_data_dict.items():
-            if cav_content['ego']:
-                ego_id = cav_id
-                ego_lidar_pose = cav_content['params']['lidar_pose']
-                break
+    # first find the ego vehicle's lidar pose
+    for cav_id, cav_content in base_data_dict.items():
+        if cav_content['ego']:
+            ego_id = cav_id
+            ego_lidar_pose = cav_content['params']['lidar_pose']
+            break
 
-        assert ego_id != -1
-        assert len(ego_lidar_pose) > 0
+    assert ego_id != -1
+    assert len(ego_lidar_pose) > 0
 
-        # loop over all CAVs to process information
-        for cav_id, selected_cav_base in base_data_dict.items():
-            distance = \
-                math.sqrt((selected_cav_base['params']['lidar_pose'][0] -
-                           ego_lidar_pose[0])**2 + (
-                                      selected_cav_base['params'][
-                                          'lidar_pose'][1] - ego_lidar_pose[
-                                          1])**2)
-            if distance > opencood.data_utils.datasets.COM_RANGE:
-                continue
+    # loop over all CAVs to process information
+    for cav_id, selected_cav_base in base_data_dict.items():
+        distance = math.sqrt(
+            (selected_cav_base['params']['lidar_pose'][0] - ego_lidar_pose[0]) ** 2 +
+            (selected_cav_base['params']['lidar_pose'][1] - ego_lidar_pose[1]) ** 2
+        )
+        if distance > opencood.data_utils.datasets.COM_RANGE:
+            continue
 
-            # find the transformation matrix from current cav to ego.
-            cav_lidar_pose = selected_cav_base['params']['lidar_pose']
-            transformation_matrix = x1_to_x2(cav_lidar_pose, ego_lidar_pose)
+        # find the transformation matrix from current cav to ego.
+        cav_lidar_pose = selected_cav_base['params']['lidar_pose']
+        transformation_matrix = x1_to_x2(cav_lidar_pose, ego_lidar_pose)
 
-            selected_cav_processed = \
-                self.get_item_single_car(selected_cav_base)
-            selected_cav_processed.update({'transformation_matrix':
-                                               transformation_matrix})
-            update_cav = "ego" if cav_id == ego_id else cav_id
-            processed_data_dict.update({update_cav: selected_cav_processed})
+        selected_cav_processed = self.get_item_single_car(selected_cav_base)
+        selected_cav_processed.update({'transformation_matrix': transformation_matrix})
 
-        return processed_data_dict
+        # ✅ ADD THIS: carry real cav id string forward for naming
+        selected_cav_processed['cav_id_str'] = f"cav_{cav_id}"
+
+        # keep existing key logic (ego stays "ego")
+        update_cav = "ego" if cav_id == ego_id else cav_id
+        processed_data_dict.update({update_cav: selected_cav_processed})
+
+    return processed_data_dict
+
 
     def collate_batch_test(self, batch):
         """
@@ -247,27 +249,29 @@ class LateFusionDataset(basedataset.BaseDataset):
 
         return output_dict
 
-    def post_process(self, data_dict, output_dict):
+    def post_process(self, data_dict, output_dict, return_per_cav=False):
         """
-        Process the outputs of the model to 2D/3D bounding box.
+        Late fusion post-process wrapper.
 
-        Parameters
-        ----------
-        data_dict : dict
-            The dictionary containing the origin input data of model.
-
-        output_dict :dict
-            The dictionary containing the output of the model.
-
-        Returns
-        -------
-        pred_box_tensor : torch.Tensor
-            The tensor of prediction bounding box after NMS.
-        gt_box_tensor : torch.Tensor
-            The tensor of gt bounding box.
+        Returns:
+          - pred_box_tensor: (N, 8, 3) or None
+          - pred_score: (N,) or None
+          - gt_box_tensor: (M, 8, 3) or None
+          - per_cav (optional): dict of per-cav detections in ego frame
         """
-        pred_box_tensor, pred_score = \
-            self.post_processor.post_process(data_dict, output_dict)
+        if return_per_cav:
+            pred_box_tensor, pred_score, per_cav = self.post_processor.post_process(
+                data_dict, output_dict, return_per_cav=True
+            )
+        else:
+            pred_box_tensor, pred_score = self.post_processor.post_process(
+                data_dict, output_dict
+            )
+
+        # IMPORTANT: NO colon at end of this line
         gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
 
-        return pred_box_tensor, pred_score, gt_box_tensor
+        if return_per_cav:
+            return pred_box_tensor, pred_score, gt_box_tensor, per_cav
+        else:
+            return pred_box_tensor, pred_score, gt_box_tensor
