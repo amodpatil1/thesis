@@ -14,9 +14,11 @@ from torch.utils.tensorboard import SummaryWriter
 import torch
 import open3d as o3d
 import resource
+
 # Increase max open files (must run before DataLoader workers start)
 soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (4096, hard))
+
 import torch.multiprocessing as mp
 mp.set_sharing_strategy("file_system")
 
@@ -34,6 +36,138 @@ from opencood.utils import eval_utils, common_utils
 from opencood.visualization import vis_utils
 
 
+# ==========================================================
+# ✅ TIMESTAMP-FREE REAL CAV-ID RESOLUTION
+# (works even when scene_id is chunk_0000)
+# ==========================================================
+def _first_str(x):
+    if isinstance(x, str):
+        return x
+    if isinstance(x, (list, tuple)) and len(x) > 0 and isinstance(x[0], str):
+        return x[0]
+    return None
+
+
+def cav_id_from_path_digits(p: str):
+    """
+    Extract cav id by scanning path components from the end
+    and returning the first all-digit directory name.
+    """
+    if not isinstance(p, str) or not p:
+        return None
+    parts = os.path.normpath(p).split(os.sep)
+    for comp in reversed(parts):
+        if comp.isdigit():
+            return comp
+    return None
+
+
+def scenario_dir_from_any_path(p: str):
+    """
+    Walk upward from a path until we find a folder that contains >=2 numeric subfolders.
+    That folder is treated as the scenario folder containing cav-id folders.
+    """
+    if not isinstance(p, str) or not p:
+        return None
+
+    cur = os.path.abspath(p)
+    if os.path.isfile(cur):
+        cur = os.path.dirname(cur)
+
+    while True:
+        if os.path.isdir(cur):
+            try:
+                subdirs = [
+                    d for d in os.listdir(cur)
+                    if d.isdigit() and os.path.isdir(os.path.join(cur, d))
+                ]
+                if len(subdirs) >= 2:
+                    return cur
+            except Exception:
+                pass
+
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+
+    return None
+
+
+def build_late_cav_map(batch_data):
+    """
+    Late fusion: map cav_key ('ego','2167',...) -> real numeric cav id.
+    We pull any path field per cav and parse the nearest numeric folder.
+    """
+    out = {}
+    for cav_key, cav_content in batch_data.items():
+        if not isinstance(cav_content, dict):
+            continue
+
+        p = _first_str(cav_content.get("lidar_path", None))
+        if p is None:
+            for k in ["pcd_path", "yaml_path", "file_path", "path", "filename"]:
+                p = _first_str(cav_content.get(k, None))
+                if p:
+                    break
+
+        cav_id = cav_id_from_path_digits(p) if p else None
+        if cav_id:
+            out[str(cav_key)] = cav_id
+    return out
+
+
+def build_intermediate_idx_to_cavid(batch_data):
+    """
+    Intermediate fusion: per_cav keys are ego/cav_1/cav_2...
+    We derive cav ids by:
+      1) finding scenario dir from any ego path
+      2) listing numeric cav folders inside it
+      3) truncating to record_len
+    Returns {0:'2149', 1:'2158', 2:'2167', ...}
+    """
+    ego = batch_data.get("ego", {})
+    if not isinstance(ego, dict):
+        return {}
+
+    # find any path-like string to locate scenario directory
+    p = None
+    for k in ["yaml_path", "lidar_path", "pcd_path", "file_path", "path", "filename"]:
+        p = _first_str(ego.get(k, None))
+        if p:
+            break
+
+    scene_dir = scenario_dir_from_any_path(p) if p else None
+    if scene_dir is None:
+        return {}
+
+    cav_ids = sorted([
+        d for d in os.listdir(scene_dir)
+        if d.isdigit() and os.path.isdir(os.path.join(scene_dir, d))
+    ])
+
+    # record_len tells how many cavs in this sample
+    rl = ego.get("record_len", None)
+    L = None
+    try:
+        if isinstance(rl, torch.Tensor):
+            L = int(rl[0].item())
+        elif isinstance(rl, (list, tuple, np.ndarray)):
+            L = int(rl[0])
+        elif rl is not None:
+            L = int(rl)
+    except Exception:
+        L = None
+
+    if L is not None:
+        cav_ids = cav_ids[:L]
+
+    return {idx: cav_id for idx, cav_id in enumerate(cav_ids)}
+
+
+# ==========================================================
+# CLI
+# ==========================================================
 def test_parser():
     parser = argparse.ArgumentParser(description="OpenCOOD inference (late/early/intermediate)")
     parser.add_argument('--model_dir', type=str, required=True,
@@ -52,19 +186,15 @@ def test_parser():
                         help='whether to save prediction and gt result in npy folder')
     parser.add_argument('--global_sort_detections', action='store_true',
                         help='whether to globally sort detections by confidence score')
+
+    parser.add_argument('--save_raw_pcd', action='store_true',
+                        help='save raw per-CAV point clouds as .pcd files (late fusion only)')
+
     opt = parser.parse_args()
     return opt
 
 
 def extract_scene_id(batch_data, batch_idx, dataset=None):
-    """
-    Try to get a stable scene identifier.
-
-    Priority:
-    1) Use any file path stored in batch_data['ego'] (preferred).
-    2) Use dataset meta (dataset.data_list or dataset.opv2v_database).
-    3) Fall back to a synthetic chunk name based on batch_idx.
-    """
     ego = batch_data.get('ego', {})
     if isinstance(ego, dict):
         path_keys = ['lidar_path', 'pcd_path', 'yaml_path', 'file_path', 'filename', 'path']
@@ -79,48 +209,11 @@ def extract_scene_id(batch_data, batch_idx, dataset=None):
                     scene_name = os.path.basename(scene_root)
                     return scene_name
 
-    if dataset is not None:
-        for attr in ['data_list', 'scenario_database', 'opv2v_database']:
-            if hasattr(dataset, attr):
-                db = getattr(dataset, attr)
-                entry = None
-                try:
-                    entry = db[batch_idx]
-                except Exception:
-                    entry = None
-
-                if isinstance(entry, dict):
-                    for k in ['lidar_path', 'pcd_path', 'yaml_path', 'path', 'file_path']:
-                        if k in entry and isinstance(entry[k], str):
-                            scene_dir = os.path.dirname(entry[k])
-                            scene_root = os.path.dirname(scene_dir)
-                            scene_name = os.path.basename(scene_root)
-                            return scene_name
-
-                if isinstance(db, (list, tuple)) and isinstance(entry, str):
-                    scene_dir = os.path.dirname(entry)
-                    scene_root = os.path.dirname(scene_dir)
-                    scene_name = os.path.basename(scene_root)
-                    return scene_name
-
-    # fallback: group by chunks of 100 frames
     chunk = batch_idx // 100
     return f"chunk_{chunk:04d}"
 
 
 def mean_det_to_gt_iou(det_boxes_tensor, gt_boxes_tensor):
-    """
-    det_boxes_tensor: torch.Tensor (N,8,3) in ego frame
-    gt_boxes_tensor : torch.Tensor (M,8,3) in ego frame
-
-    Returns:
-      mean_iou: float or None
-      num_pred: int
-      num_gt: int
-
-    Metric:
-      For each det, take max IoU with any GT, then average across dets.
-    """
     if det_boxes_tensor is None or gt_boxes_tensor is None:
         return None, 0, 0
 
@@ -151,6 +244,62 @@ def mean_det_to_gt_iou(det_boxes_tensor, gt_boxes_tensor):
     return float(np.mean(ious)), len(det_polys), len(gt_polys)
 
 
+def _to_np(x):
+    if x is None:
+        return None
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def _tensor_to_xyz_np(x):
+    if x is None:
+        return None
+    arr = _to_np(x)
+    if arr is None:
+        return None
+    if arr.ndim == 3:
+        arr = arr[0]
+    if arr.ndim != 2:
+        return None
+    if arr.shape[1] < 3:
+        return None
+    return arr[:, :3]
+
+
+def _save_pcd_xyz(path, xyz_np):
+    if xyz_np is None or xyz_np.shape[0] == 0:
+        return
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(xyz_np.astype(np.float64))
+    o3d.io.write_point_cloud(path, pcd, write_ascii=False)
+
+
+def _apply_4x4_to_boxes_corners(boxes_8_3: torch.Tensor, T_4x4: torch.Tensor) -> torch.Tensor:
+    if boxes_8_3 is None:
+        return boxes_8_3
+    if isinstance(boxes_8_3, torch.Tensor) and boxes_8_3.shape[0] == 0:
+        return boxes_8_3
+
+    if not isinstance(boxes_8_3, torch.Tensor):
+        boxes_8_3 = torch.as_tensor(boxes_8_3)
+
+    if not isinstance(T_4x4, torch.Tensor):
+        T_4x4 = torch.as_tensor(T_4x4, device=boxes_8_3.device, dtype=boxes_8_3.dtype)
+    else:
+        T_4x4 = T_4x4.to(device=boxes_8_3.device, dtype=boxes_8_3.dtype)
+
+    N = boxes_8_3.shape[0]
+    pts = boxes_8_3.reshape(-1, 3)
+    ones = torch.ones((pts.shape[0], 1), device=pts.device, dtype=pts.dtype)
+    pts_h = torch.cat([pts, ones], dim=1)
+    pts_out = (T_4x4 @ pts_h.t()).t()[:, :3]
+    return pts_out.reshape(N, 8, 3)
+
+
+# ==========================================================
+# MAIN
+# ==========================================================
 def main():
     opt = test_parser()
     assert opt.fusion_method in ['late', 'early', 'intermediate']
@@ -181,107 +330,66 @@ def main():
     _, model = train_utils.load_saved_model(saved_path, model)
     model.eval()
 
-    # loss function (same as training)
     criterion = train_utils.create_loss(hypes)
 
-    # per-scene aggregation
     scene_losses = defaultdict(list)
     scene_ious = defaultdict(list)
     scene_counts = defaultdict(int)
 
-    # TensorBoard writer
     log_dir = os.path.join(opt.model_dir, "tb_inference")
     print(f"TensorBoard logs will be written to: {log_dir}")
     writer = SummaryWriter(log_dir=log_dir)
 
-    # per-cav iou csv rows
     per_cav_rows = []
 
-    # eval stats
     result_stat = {
         0.3: {'tp': [], 'fp': [], 'gt': 0, 'score': []},
         0.5: {'tp': [], 'fp': [], 'gt': 0, 'score': []},
         0.7: {'tp': [], 'fp': [], 'gt': 0, 'score': []}
     }
 
-    # sequence visualizer
-    if opt.show_sequence:
-        vis = o3d.visualization.Visualizer()
-        vis.create_window()
-        render_option = vis.get_render_option()
-        render_option.background_color = [0.05, 0.05, 0.05]
-        render_option.point_size = 1.0
-        render_option.show_coordinate_frame = True
-        vis_pcd = o3d.geometry.PointCloud()
-        vis_aabbs_gt = [o3d.geometry.LineSet() for _ in range(50)]
-        vis_aabbs_pred = [o3d.geometry.LineSet() for _ in range(50)]
-
-    seen_scenes = set()
-    prev_scene = None
-
-    def _to_np(x):
-        if x is None:
-            return None
-        if isinstance(x, torch.Tensor):
-            return x.detach().cpu().numpy()
-        return np.asarray(x)
+    det_root = os.path.join(opt.model_dir, "per_chunk_dets")
+    os.makedirs(det_root, exist_ok=True)
 
     # ---------- INFERENCE LOOP ----------
-    for i, batch_data in tqdm(enumerate(data_loader)):
+    for step, batch_data in tqdm(enumerate(data_loader), total=len(opencood_dataset)):
         with torch.no_grad():
+            per_cav = None
             batch_data = train_utils.to_device(batch_data, device)
 
-            # get scene id
-            scene_id = extract_scene_id(batch_data, i, dataset=opencood_dataset)
+            scene_id = extract_scene_id(batch_data, step, dataset=opencood_dataset)
             scene_counts[scene_id] += 1
-            if scene_id not in seen_scenes:
-                print(f"[SCENE] New scene encountered: {scene_id}")
-                seen_scenes.add(scene_id)
-            if scene_id != prev_scene:
-                writer.add_text("inference/scene_change",
-                                f"step {i}: scene {scene_id}", i)
-                prev_scene = scene_id
+
+            scene_dir = os.path.join(det_root, str(scene_id))
+            os.makedirs(scene_dir, exist_ok=True)
+
+            sample_id = step
 
             # ---------- LOSS PER SAMPLE ----------
             output_for_loss = model(batch_data['ego'])
-            loss_value = criterion(output_for_loss,
-                                   batch_data['ego']['label_dict'])
+            loss_value = criterion(output_for_loss, batch_data['ego']['label_dict'])
             loss_scalar = float(loss_value.item())
             scene_losses[scene_id].append(loss_scalar)
-            writer.add_scalar("inference/loss", loss_scalar, i)
+            writer.add_scalar("inference/loss", loss_scalar, step)
 
             # ---------- DETECTION INFERENCE ----------
-            per_cav = None
             if opt.fusion_method == 'late':
                 pred_box_tensor, pred_score, gt_box_tensor, per_cav = \
                     inference_utils.inference_late_fusion(
-                        batch_data,
-                        model,
-                        opencood_dataset,
-                        return_per_cav=True
+                        batch_data, model, opencood_dataset, return_per_cav=True
                     )
-            elif opt.fusion_method == 'early':
+            elif opt.fusion_method == 'intermediate':
+                pred_box_tensor, pred_score, gt_box_tensor, per_cav = \
+                    inference_utils.inference_intermediate_fusion(
+                        batch_data, model, opencood_dataset, return_per_cav=True
+                    )
+            else:
                 pred_box_tensor, pred_score, gt_box_tensor = \
                     inference_utils.inference_early_fusion(
                         batch_data, model, opencood_dataset
                     )
-            elif opt.fusion_method == 'intermediate':
-                pred_box_tensor, pred_score, gt_box_tensor = \
-                    inference_utils.inference_intermediate_fusion(
-                        batch_data, model, opencood_dataset
-                    )
-            else:
-                raise NotImplementedError('Only early, late and intermediate fusion is supported.')
 
-            # ---------- SAVE DETECTIONS (PER SCENE FOLDER) ----------
-            det_root = os.path.join(opt.model_dir, "per_chunk_dets")
-            os.makedirs(det_root, exist_ok=True)
-            scene_dir = os.path.join(det_root, str(scene_id))
-            os.makedirs(scene_dir, exist_ok=True)
-
-            sample_id = i  # replace with real frame id if you have it
-
-            # ---- Save fused output ----
+            # ---------- SAVE FUSED ----------
             fused_out = {
                 "scene_id": str(scene_id),
                 "sample_id": int(sample_id),
@@ -289,157 +397,117 @@ def main():
                 "pred_score": _to_np(pred_score),
                 "gt_box_tensor": _to_np(gt_box_tensor),
             }
-            np.save(os.path.join(scene_dir, f"{sample_id:06d}_fused.npy"),
-                    fused_out, allow_pickle=True)
+            np.save(os.path.join(scene_dir, f"{sample_id:06d}_fused.npy"), fused_out, allow_pickle=True)
 
-            # ---- Save per-CAV preds as separate files + compute per-cav IoU ----
-            if opt.fusion_method == "late" and per_cav is not None:
+            # =====================================================================
+            # ✅ SAVE DETECTIONS PER CAV USING REAL NUMERIC CAV ID
+            # =====================================================================
+            if opt.fusion_method in ["late", "intermediate"] and per_cav is not None:
+                per_cav_dir = os.path.join(scene_dir, "per_cav")
+                os.makedirs(per_cav_dir, exist_ok=True)
+
+                # Build cav-id mapping ONCE per sample
+                late_map = None
+                idx_map = None
+                if opt.fusion_method == "late":
+                    late_map = build_late_cav_map(batch_data)
+                else:
+                    idx_map = build_intermediate_idx_to_cavid(batch_data)
+
+                # For optional intermediate IoU in cav frame
+                ego_pairwise = None
+                ego_record_len = None
+                if opt.fusion_method == "intermediate":
+                    ego_pairwise = batch_data.get("ego", {}).get("pairwise_t_matrix", None)
+                    ego_record_len = batch_data.get("ego", {}).get("record_len", None)
+
                 cav_list = []
 
                 for cav_key, d in per_cav.items():
-                    cav_str = str(cav_key)
-                    # keep "ego" as "ego", but normalize numeric ids
-                    if cav_str.isdigit():
-                        cav_str = f"cav_{cav_str}"
-                    elif cav_str.startswith("cav_"):
-                        pass
-                    elif cav_str.lower() == "ego":
-                        cav_str = "ego"
+                    cav_key_str = str(cav_key)
+
+                    if cav_key_str.lower() == "ego":
+                        cav_idx = 0
+                    elif cav_key_str.startswith("cav_"):
+                        cav_idx = int(cav_key_str.split("_", 1)[1])
                     else:
-                        # fallback
-                        cav_str = cav_str
+                        continue
 
-                    cav_list.append(cav_str)
+                    # Resolve real cav id
+                    # Resolve real cav id with fallbacks
+                    real_cav_id = None
 
-                    b = d.get("boxes", None)   # torch (N,8,3) ego-frame
-                    s = d.get("scores", None)  # torch (N,)
+                    if opt.fusion_method == "late":
+                        # Try to get from map
+                        real_cav_id = late_map.get(cav_key_str, None) if late_map else None
+                        
+                        # Fallback 1: If key itself is numeric, use it
+                        if real_cav_id is None and cav_key_str.isdigit():
+                            real_cav_id = cav_key_str
+                        
+                        # Fallback 2: Use indexed naming
+                        if real_cav_id is None:
+                            real_cav_id = f"cav_{cav_idx}"
+                    else:  # intermediate
+                        # Try to get from map
+                        real_cav_id = idx_map.get(cav_idx, None) if idx_map else None
+                        
+                        # Fallback: Use indexed naming
+                        if real_cav_id is None:
+                            real_cav_id = f"cav_{cav_idx}"
 
-                    # --- per-cav IoU vs GT (ego-frame) ---
-                    cav_mean_iou, cav_num_pred, cav_num_gt = mean_det_to_gt_iou(b, gt_box_tensor)
+                    # Skip only if we still couldn't determine an ID (shouldn't happen with fallbacks)
+                    if real_cav_id is None:
+                        continue
 
-                    # store row (use -1.0 when not computable)
+                    cav_list.append(str(real_cav_id))
+
+                    b = d.get("boxes", None)
+                    s = d.get("scores", None)
+
+                    cav_mean_iou = None
+                    cav_num_pred = int(b.shape[0]) if isinstance(b, torch.Tensor) else 0
+                    cav_num_gt = int(gt_box_tensor.shape[0]) if isinstance(gt_box_tensor, torch.Tensor) else 0
+
+                    if opt.fusion_method == "late":
+                        cav_mean_iou, cav_num_pred, cav_num_gt = mean_det_to_gt_iou(b, gt_box_tensor)
+                    else:
+                        if (ego_pairwise is not None) and (ego_record_len is not None) and isinstance(gt_box_tensor, torch.Tensor):
+                            try:
+                                L = int(ego_record_len[0])
+                            except Exception:
+                                L = None
+                            if L is not None and 0 <= cav_idx < L:
+                                T_ego_to_cav = ego_pairwise[0, 0, cav_idx]
+                                gt_cav = _apply_4x4_to_boxes_corners(gt_box_tensor, T_ego_to_cav)
+                                cav_mean_iou, cav_num_pred, cav_num_gt = mean_det_to_gt_iou(b, gt_cav)
+
                     per_cav_rows.append([
-                        str(scene_id),
-                        int(sample_id),
-                        cav_str,
+                        str(scene_id), int(sample_id), str(real_cav_id),
                         -1.0 if cav_mean_iou is None else float(cav_mean_iou),
-                        int(cav_num_pred),
-                        int(cav_num_gt)
+                        int(cav_num_pred), int(cav_num_gt)
                     ])
-
-                    # optional TB logging per cav
-                    if cav_mean_iou is not None:
-                        writer.add_scalar(f"inference/per_cav_mean_iou/{cav_str}", cav_mean_iou, i)
 
                     out = {
                         "scene_id": str(scene_id),
                         "sample_id": int(sample_id),
-                        "cav_id": cav_str,
+                        "cav_id": str(real_cav_id),
                         "pred_box_tensor": _to_np(b),
                         "pred_score": _to_np(s),
                         "gt_box_tensor": _to_np(gt_box_tensor),
                         "mean_iou_det_to_gt": cav_mean_iou,
                     }
-
-                    np.save(os.path.join(scene_dir, f"{sample_id:06d}_{cav_str}_pred.npy"),
+                    np.save(os.path.join(per_cav_dir, f"{sample_id:06d}_{real_cav_id}_pred.npy"),
                             out, allow_pickle=True)
 
-                # write which cavs were present
-                with open(os.path.join(scene_dir, f"{sample_id:06d}_cavs.txt"), "w") as f:
+                with open(os.path.join(per_cav_dir, f"{sample_id:06d}_cavs.txt"), "w") as f:
                     f.write("\n".join(cav_list))
 
-            # ---------- PER-SAMPLE MEAN IoU (diagnostic, fused) ----------
-            mean_iou_sample = None
-            if (pred_box_tensor is not None) and (gt_box_tensor is not None) \
-                    and pred_box_tensor.shape[0] > 0 and gt_box_tensor.shape[0] > 0:
-
-                det_boxes_np = common_utils.torch_tensor_to_numpy(pred_box_tensor)
-                gt_boxes_np = common_utils.torch_tensor_to_numpy(gt_box_tensor)
-
-                det_polygons = list(common_utils.convert_format(det_boxes_np))
-                gt_polygons = list(common_utils.convert_format(gt_boxes_np))
-
-                sample_ious = []
-                for det_poly in det_polygons:
-                    if len(gt_polygons) == 0:
-                        break
-                    ious = common_utils.compute_iou(det_poly, gt_polygons)
-                    if len(ious) > 0:
-                        sample_ious.append(float(np.max(ious)))
-
-                if len(sample_ious) > 0:
-                    mean_iou_sample = float(np.mean(sample_ious))
-                    scene_ious[scene_id].append(mean_iou_sample)
-                    writer.add_scalar("inference/mean_iou_sample", mean_iou_sample, i)
-
-            # ---------- TP/FP STATS FOR AP ----------
-            eval_utils.caluclate_tp_fp(pred_box_tensor, pred_score, gt_box_tensor, result_stat, 0.3)
-            eval_utils.caluclate_tp_fp(pred_box_tensor, pred_score, gt_box_tensor, result_stat, 0.5)
-            eval_utils.caluclate_tp_fp(pred_box_tensor, pred_score, gt_box_tensor, result_stat, 0.7)
-
-            # ---------- SIMPLE TB LOGGING: NUM BOXES ----------
-            num_pred = int(pred_box_tensor.shape[0]) if pred_box_tensor is not None else 0
-            num_gt = int(gt_box_tensor.shape[0]) if gt_box_tensor is not None else 0
-            writer.add_scalar("inference/num_pred_boxes", num_pred, i)
-            writer.add_scalar("inference/num_gt_boxes", num_gt, i)
-
-            if mean_iou_sample is not None:
-                print(f"[Sample {i:05d}] scene={scene_id} | loss={loss_scalar:.4f} | "
-                      f"mean_IoU={mean_iou_sample:.4f} | #pred={num_pred} | #gt={num_gt}")
-            else:
-                print(f"[Sample {i:05d}] scene={scene_id} | loss={loss_scalar:.4f} | "
-                      f"mean_IoU=N/A | #pred={num_pred} | #gt={num_gt}")
-
-            # ---------- SAVE NPY (OpenCOOD default) ----------
-            if opt.save_npy:
-                npy_save_path = os.path.join(opt.model_dir, 'npy')
-                os.makedirs(npy_save_path, exist_ok=True)
-                inference_utils.save_prediction_gt(
-                    pred_box_tensor,
-                    gt_box_tensor,
-                    batch_data['ego']['origin_lidar'][0],
-                    i,
-                    npy_save_path
-                )
-
-            # ---------- SINGLE-IMAGE VIS ----------
-            if opt.show_vis or opt.save_vis:
-                vis_save_path = ''
-                if opt.save_vis:
-                    vis_save_path = os.path.join(opt.model_dir, 'vis')
-                    os.makedirs(vis_save_path, exist_ok=True)
-                    vis_save_path = os.path.join(vis_save_path, '%05d.png' % i)
-
-                opencood_dataset.visualize_result(
-                    pred_box_tensor,
-                    gt_box_tensor,
-                    batch_data['ego']['origin_lidar'],
-                    opt.show_vis,
-                    vis_save_path,
-                    dataset=opencood_dataset
-                )
-
-            # ---------- SEQUENCE VIS ----------
-            if opt.show_sequence:
-                pcd, pred_o3d_box, gt_o3d_box = \
-                    vis_utils.visualize_inference_sample_dataloader(
-                        pred_box_tensor,
-                        gt_box_tensor,
-                        batch_data['ego']['origin_lidar'],
-                        vis_pcd,
-                        mode='constant'
-                    )
-                if i == 0:
-                    vis.add_geometry(pcd)
-                    vis_utils.linset_assign_list(vis, vis_aabbs_pred, pred_o3d_box, update_mode='add')
-                    vis_utils.linset_assign_list(vis, vis_aabbs_gt, gt_o3d_box, update_mode='add')
-
-                vis_utils.linset_assign_list(vis, vis_aabbs_pred, pred_o3d_box)
-                vis_utils.linset_assign_list(vis, vis_aabbs_gt, gt_o3d_box)
-                vis.update_geometry(pcd)
-                vis.poll_events()
-                vis.update_renderer()
-                time.sleep(0.001)
+            # ---------- TP/FP stats ----------
+            if opt.fusion_method in ["late", "intermediate"]:
+                eval_utils.caluclate_tp_fp(pred_box_tensor, pred_score, gt_box_tensor, result_stat, 0.3)
+                eval_utils.caluclate_tp_fp(pred_box_tensor, pred_score, gt_box_tensor, result_stat, 0.5)
+                eval_utils.caluclate_tp_fp(pred_box_tensor, pred_score, gt_box_tensor, result_stat, 0.7)
 
     # ---------- WRITE PER-CAV IOU CSV ----------
     per_cav_csv_path = os.path.join(opt.model_dir, "per_cav_iou.csv")
@@ -451,57 +519,6 @@ def main():
 
     # ---------- FINAL EVAL ----------
     eval_utils.eval_final_results(result_stat, opt.model_dir, opt.global_sort_detections)
-
-    # ---------- COLLATE PER-SCENE METRICS ----------
-    scenes = sorted(scene_counts.keys())
-
-    mean_loss = {s: (float(np.mean(scene_losses[s])) if scene_losses[s] else float('nan')) for s in scenes}
-    mean_iou = {s: (float(np.mean(scene_ious[s])) if scene_ious[s] else float('nan')) for s in scenes}
-
-    # save CSV summary
-    csv_path = os.path.join(opt.model_dir, "scene_metrics.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer_csv = csv.writer(f)
-        writer_csv.writerow(["scene_id", "num_samples", "mean_loss", "mean_iou"])
-        for s in scenes:
-            writer_csv.writerow([s, scene_counts[s], mean_loss[s], mean_iou[s]])
-    print(f"[INFO] Scene metrics saved to: {csv_path}")
-
-    # plots
-    if scenes:
-        losses_plot = [mean_loss[s] for s in scenes]
-        plt.figure(figsize=(max(10, len(scenes) * 0.4), 5))
-        plt.bar(range(len(scenes)), losses_plot)
-        plt.xticks(range(len(scenes)), scenes, rotation=90)
-        plt.ylabel("Mean Loss")
-        plt.title("Per-scene Loss During Inference")
-        plt.tight_layout()
-        save_path_loss = os.path.join(opt.model_dir, "scene_loss_analysis.png")
-        plt.savefig(save_path_loss, dpi=250)
-        plt.close()
-        print(f"[INFO] Per-scene loss graph saved to: {save_path_loss}")
-
-        ious_plot = [mean_iou[s] for s in scenes]
-        plt.figure(figsize=(max(10, len(scenes) * 0.4), 5))
-        plt.bar(range(len(scenes)), ious_plot)
-        plt.xticks(range(len(scenes)), scenes, rotation=90)
-        plt.ylabel("Mean IoU")
-        plt.title("Per-scene Mean IoU During Inference (diagnostic)")
-        plt.tight_layout()
-        save_path_iou = os.path.join(opt.model_dir, "scene_iou_analysis.png")
-        plt.savefig(save_path_iou, dpi=250)
-        plt.close()
-        print(f"[INFO] Per-scene IoU graph saved to: {save_path_iou}")
-
-        for idx, s in enumerate(scenes):
-            writer.add_scalar("inference/scene_mean_loss", mean_loss[s], idx)
-            if not np.isnan(mean_iou[s]):
-                writer.add_scalar("inference/scene_mean_iou", mean_iou[s], idx)
-            writer.add_text("inference/scene_id", f"{idx}: {s}", idx)
-
-    # cleanup
-    if opt.show_sequence:
-        vis.destroy_window()
 
     writer.close()
     print(f"TensorBoard writer closed. Logs at: {log_dir}")
