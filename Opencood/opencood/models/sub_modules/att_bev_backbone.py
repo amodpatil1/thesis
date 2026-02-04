@@ -112,34 +112,94 @@ class AttBEVBackbone(nn.Module):
         self.num_bev_features = c_in
 
     def forward(self, data_dict):
-        spatial_features = data_dict['spatial_features']
-        record_len = data_dict['record_len']
+        """
+        Inputs:
+        data_dict['spatial_features']: [sumL, C, H, W]   (stacked across agents)
+        data_dict['record_len']:       e.g. tensor([L]) when batch_size=1
 
-        ups = []
+        Outputs:
+        data_dict['spatial_features_2d']:            fused BEV feature [1, C_out, H_out, W_out]
+        data_dict['spatial_features_2d_per_agent']:  per-agent BEV feature [sumL, C_out, H_out, W_out]  (NEW)
+        """
+        spatial_features = data_dict['spatial_features']   # [sumL, C, H, W]
+        record_len = data_dict['record_len']               # tensor([L]) when batch=1
+
+        ups_fused = []
+        ups_per_agent = []   # NEW: per-agent upsampled features at each scale
+
         ret_dict = {}
         x = spatial_features
 
+        # Toggle: if you ever want to turn it off from caller, set this flag in data_dict
+        save_per_agent = data_dict.get("save_per_agent_features", True)
+
         for i in range(len(self.blocks)):
-            x = self.blocks[i](x)
+            # ---------------------------------------------------
+            # 1) Backbone block (still per-agent stacked)
+            # ---------------------------------------------------
+            x = self.blocks[i](x)  # [sumL, C_i, H_i, W_i]
+
             if self.compress and i < len(self.compression_modules):
                 x = self.compression_modules[i](x)
-            x_fuse = self.fuse_modules[i](x, record_len)
 
+            # Save per-level per-agent features (optional debug)
             stride = int(spatial_features.shape[2] / x.shape[2])
-            ret_dict['spatial_features_%dx' % stride] = x
+            ret_dict[f"spatial_features_{stride}x_per_agent"] = x
 
+            # ---------------------------------------------------
+            # 2) Fuse per level
+            # ---------------------------------------------------
+            x_fuse = self.fuse_modules[i](x, record_len)  # usually [B=1, C_i, H_i, W_i]
+
+            # ---------------------------------------------------
+            # 3) Upsample both fused and per-agent tensors
+            # ---------------------------------------------------
             if len(self.deblocks) > 0:
-                ups.append(self.deblocks[i](x_fuse))
-            else:
-                ups.append(x_fuse)
+                ups_fused.append(self.deblocks[i](x_fuse))
 
-        if len(ups) > 1:
-            x = torch.cat(ups, dim=1)
-        elif len(ups) == 1:
-            x = ups[0]
+                if save_per_agent:
+                    # Apply same deblock to the stacked per-agent tensor
+                    ups_per_agent.append(self.deblocks[i](x))
+            else:
+                ups_fused.append(x_fuse)
+
+                if save_per_agent:
+                    ups_per_agent.append(x)
+
+        # ---------------------------------------------------
+        # 4) Concatenate multi-scale fused features
+        # ---------------------------------------------------
+        if len(ups_fused) > 1:
+            x_out = torch.cat(ups_fused, dim=1)
+        elif len(ups_fused) == 1:
+            x_out = ups_fused[0]
+        else:
+            x_out = x  # should not happen
 
         if len(self.deblocks) > len(self.blocks):
-            x = self.deblocks[-1](x)
+            x_out = self.deblocks[-1](x_out)
 
-        data_dict['spatial_features_2d'] = x
+        data_dict['spatial_features_2d'] = x_out  # fused final feature
+
+        # ---------------------------------------------------
+        # 5) Concatenate multi-scale per-agent features  (NEW)
+        # ---------------------------------------------------
+        if save_per_agent:
+            if len(ups_per_agent) > 1:
+                x_pa = torch.cat(ups_per_agent, dim=1)  # [sumL, C_out, H_out, W_out]
+            elif len(ups_per_agent) == 1:
+                x_pa = ups_per_agent[0]
+            else:
+                x_pa = x
+
+            if len(self.deblocks) > len(self.blocks):
+                x_pa = self.deblocks[-1](x_pa)
+
+            data_dict['spatial_features_2d_per_agent'] = x_pa
+
+        # Keep debug features (optional)
+        data_dict.update(ret_dict)
+
         return data_dict
+
+
